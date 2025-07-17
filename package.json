@@ -8,11 +8,11 @@
     "start": "node dist/proxy-server.js",
     "dev": "ts-node-dev --respawn --transpile-only src/proxy-server.ts",
     "clean": "rimraf dist",
-    "service:install": "node service.js install",
-    "service:uninstall": "node service.js uninstall",
-    "service:start": "node service.js start",
-    "service:stop": "node service.js stop",
-    "service:restart": "node service.js restart"
+    "service:install": "node src/service.js install",
+    "service:uninstall": "node src/service.js uninstall",
+    "service:start": "node src/service.js start",
+    "service:stop": "node src/service.js stop",
+    "service:restart": "node src/service.js restart"
   },
   "dependencies": {
     "compression": "^1.8.0",

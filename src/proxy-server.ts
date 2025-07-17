@@ -31,20 +31,47 @@ app.use(helmet({
 }));
 
 // CORS configuration
-app.use(cors({
-  origin: config.security.allowedOrigins,
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+// app.use(cors({
+//   origin: config.security.allowedOrigins,
+//   credentials: true,
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+//   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+// }));
+
+// middleware to handle private network requests
+app.use((req: Request, res: Response, next: NextFunction): void => {
+  const origin = req.headers.origin;
+  const allowedOrigins = config.security.allowedOrigins;
+
+  if (allowedOrigins.includes(origin || '')) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  // This is the key header for private network requests
+  if (req.headers['access-control-request-private-network']) {
+    res.header('Access-Control-Allow-Private-Network', 'true');
+  }
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+    return;
+  }
+
+  next();
+});
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: config.security.rateLimitWindowMs,
   max: config.security.rateLimitMax,
-  message: { 
+  message: {
     success: false,
-    error: 'Too many requests from this IP, please try again later.' 
+    error: 'Too many requests from this IP, please try again later.'
   },
   standardHeaders: true,
   legacyHeaders: false
@@ -76,7 +103,7 @@ const proxyOptions: Options<http.IncomingMessage, http.ServerResponse> = {
     // Handle error events
     error(err, req, res) {
       console.error('Proxy error:', err);
-      
+
       // Check if res is a ServerResponse (not a Socket)
       if ('writeHead' in res && !res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'application/json' });

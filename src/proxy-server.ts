@@ -14,7 +14,7 @@ const app: Application = express();
 // Configuration
 const config = {
   proxy: {
-    target: process.env.PRINT_SERVER_URL || 'http://10.0.1.12:3000',
+    target: process.env.PRINT_SERVER_URL || 'http://localhost:3000',
     port: parseInt(process.env.PROXY_PORT || '8080'),
     host: process.env.PROXY_HOST || '0.0.0.0'
   },
@@ -98,6 +98,9 @@ const proxyOptions: Options<http.IncomingMessage, http.ServerResponse> = {
   xfwd: true,
   timeout: 30000,
   proxyTimeout: 30000,
+  headers: {
+    'Connection': 'keep-alive'
+  },
 
   on: {
     // Handle error events

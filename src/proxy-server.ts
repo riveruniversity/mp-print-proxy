@@ -19,10 +19,14 @@ const app: Application = express();
 // Configuration
 const config = {
   proxy: {
-    target: process.env.PRINT_SERVER_URL || 'http://localhost:3000',
     httpsPort: parseInt(process.env.HTTPS_PORT || '8443'),
     httpPort: parseInt(process.env.HTTP_PORT || '8080'),
     host: process.env.PROXY_HOST || '0.0.0.0'
+  },
+  target: {
+    url: (process.env.PRINT_SERVER_HOST + ':' + process.env.PRINT_SERVER_PORT) || 'http://localhost:3000',
+    port: parseInt(process.env.PRINT_SERVER_PORT || '3000'),
+    host: process.env.PRINT_SERVER_HOST || '0.0.0.0'
   },
   security: {
     allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') || ['*'],
@@ -32,7 +36,7 @@ const config = {
 };
 
 console.log('🔧 Proxy Configuration:');
-console.log(`   Target: ${config.proxy.target}`);
+console.log(`   Target: ${config.target.url}`);
 console.log(`   HTTP Port: ${config.proxy.httpPort}`);
 console.log(`   HTTPS Port: ${config.proxy.httpsPort}`);
 console.log(`   Host: ${config.proxy.host}`);
@@ -200,7 +204,7 @@ app.use('/', proxyRoutes);
 
 // Proxy configuration with proper error handling
 const proxyOptions: Options = {
-  target: config.proxy.target,
+  target: config.target.url,
   changeOrigin: true,
   
   // Timeout settings
@@ -213,7 +217,7 @@ const proxyOptions: Options = {
   on: {
     proxyReq: (proxyReq: http.ClientRequest, req: http.IncomingMessage) => {
       const protocol = (req.socket as any).encrypted ? 'HTTPS' : 'HTTP';
-      console.log(`🚀 ${protocol} PROXY REQ: ${req.method} ${req.url} → ${config.proxy.target}${req.url}`);
+      console.log(`🚀 ${protocol} PROXY REQ: ${req.method} ${req.url} → ${config.target.url}${req.url}`);
     },
     
     proxyRes: (proxyRes: http.IncomingMessage, req: http.IncomingMessage) => {
@@ -233,7 +237,7 @@ const proxyOptions: Options = {
       console.error(`❌ ${protocol} PROXY ERROR for ${req.method} ${req.url}:`, {
         message: err.message,
         code: (err as any).code,
-        target: config.proxy.target
+        target: config.target.url
       });
       
       // Type guard and error response
@@ -245,7 +249,7 @@ const proxyOptions: Options = {
         res.end(JSON.stringify({
           success: false,
           error: 'Print server unavailable',
-          message: `Unable to connect to print server at ${config.proxy.target}`,
+          message: `Unable to connect to print server at ${config.target.url}`,
           details: err.message,
           code: (err as any).code,
           protocol: protocol
@@ -310,7 +314,7 @@ const httpServer = http.createServer(app);
 httpServer.listen(config.proxy.httpPort, config.proxy.host, () => {
   console.log(`\n🌐 HTTP Proxy Server:`);
   console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.httpPort}`);
-  console.log(`   Proxying to: ${config.proxy.target}`);
+  console.log(`   Proxying to: ${config.target.url}`);
   console.log(`   Status: ✅ Ready (no certificate required)`);
 });
 
@@ -322,7 +326,7 @@ if (sslOptions) {
     httpsServer.listen(config.proxy.httpsPort, config.proxy.host, () => {
       console.log(`\n🔒 HTTPS Proxy Server:`);
       console.log(`   Listening on: https://${config.proxy.host}:${config.proxy.httpsPort}`);
-      console.log(`   Proxying to: ${config.proxy.target}`);
+      console.log(`   Proxying to: ${config.target.url}`);
       console.log(`   Status: ✅ Ready (certificate loaded successfully)`);
     });
     

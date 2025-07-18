@@ -5,11 +5,27 @@ import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
 
 // Import routes
 import proxyRoutes from './routes/proxy';
 
 dotenv.config();
+
+
+
+
+// Add SSL configuration
+const sslConfig = {
+  enabled: process.env.SSL_ENABLED === 'true' || process.env.NODE_ENV === 'production',
+  keyPath: process.env.SSL_KEY_PATH || path.join(__dirname, '../certs/key.pem'),
+  certPath: process.env.SSL_CERT_PATH || path.join(__dirname, '../certs/cert.pem'),
+  httpsPort: parseInt(process.env.HTTPS_PORT || '8443')
+};
+
+
 
 const app: Application = express();
 
@@ -101,24 +117,24 @@ app.use('/', proxyRoutes);
 const proxyOptions: Options = {
   target: config.proxy.target,
   changeOrigin: true,
-  
+
   // Timeout settings
   timeout: 30000,
   proxyTimeout: 30000,
-  
+
   // Preserve original headers
   preserveHeaderKeyCase: true,
-  
+
   on: {
     proxyReq: (proxyReq: http.ClientRequest, req: http.IncomingMessage) => {
       console.log(`🚀 PROXY REQ: ${req.method} ${req.url} → ${config.proxy.target}${req.url}`);
       console.log(`   Content-Length: ${req.headers['content-length'] || 'unknown'}`);
       console.log(`   Content-Type: ${req.headers['content-type'] || 'unknown'}`);
     },
-    
+
     proxyRes: (proxyRes: http.IncomingMessage, req: http.IncomingMessage) => {
       console.log(`✅ PROXY RES: ${proxyRes.statusCode} for ${req.method} ${req.url}`);
-      
+
       // Add CORS headers to proxied responses
       if (proxyRes.headers) {
         proxyRes.headers['access-control-allow-origin'] = '*';
@@ -126,17 +142,17 @@ const proxyOptions: Options = {
         proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization, X-Requested-With';
       }
     },
-    
+
     error: (err: Error, req: http.IncomingMessage, res: http.ServerResponse | any) => {
       console.error(`❌ PROXY ERROR for ${req.method} ${req.url}:`, {
         message: err.message,
         code: (err as any).code,
         target: config.proxy.target
       });
-      
+
       // Type guard and error response
       if ('writeHead' in res && 'end' in res && res.writable && !res.headersSent) {
-        res.writeHead(502, { 
+        res.writeHead(502, {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*'
         });
@@ -158,12 +174,12 @@ const proxy = createProxyMiddleware(proxyOptions);
 // Apply proxy to all routes except those handled by proxyRoutes
 app.use((req: Request, res: Response, next: NextFunction) => {
   // Skip proxy for routes handled by proxyRoutes
-  if (req.path === '/proxy-health' || 
-      req.path === '/test-connection' || 
-      req.path === '/status') {
+  if (req.path === '/proxy-health' ||
+    req.path === '/test-connection' ||
+    req.path === '/status') {
     return next();
   }
-  
+
   // Use proxy for all other routes (especially /api/*)
   return proxy(req, res, next);
 });
@@ -176,7 +192,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     url: req.url,
     method: req.method
   });
-  
+
   if (!res.headersSent) {
     res.status(500).json({
       success: false,
@@ -197,18 +213,80 @@ app.use('*', (req: Request, res: Response) => {
 });
 
 // Start the proxy server
-const server = app.listen(config.proxy.port, config.proxy.host, () => {
-  console.log(`\n🚀 Proxy Server Started Successfully!`);
-  console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.port}`);
-  console.log(`   Proxying to: ${config.proxy.target}`);
-  console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`\n📋 Available Endpoints:`);
-  console.log(`   GET  /proxy-health     - Proxy server health check`);
-  console.log(`   GET  /test-connection  - Test connection to print server`);
-  console.log(`   GET  /status          - Detailed server status`);
-  console.log(`   *    /api/*           - Proxied to print server`);
-  console.log(`\n✅ Proxy server is ready to handle requests`);
-});
+// Create server (HTTP or HTTPS based on configuration)
+let server: any;
+
+if (sslConfig.enabled) {
+  try {
+    // Check if certificate files exist
+    if (!fs.existsSync(sslConfig.keyPath)) {
+      throw new Error(`SSL key file not found: ${sslConfig.keyPath}`);
+    }
+    if (!fs.existsSync(sslConfig.certPath)) {
+      throw new Error(`SSL certificate file not found: ${sslConfig.certPath}`);
+    }
+
+    // Read SSL certificates
+    const sslOptions = {
+      key: fs.readFileSync(sslConfig.keyPath),
+      cert: fs.readFileSync(sslConfig.certPath)
+    };
+
+    // Create HTTPS server
+    server = https.createServer(sslOptions, app).listen(sslConfig.httpsPort, config.proxy.host, () => {
+      console.log(`\n🔒 HTTPS Proxy Server Started Successfully!`);
+      console.log(`   Listening on: https://${config.proxy.host}:${sslConfig.httpsPort}`);
+      console.log(`   Proxying to: ${config.proxy.target}`);
+      console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`   SSL Enabled: ✅`);
+      console.log(`\n📋 Available Endpoints:`);
+      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/proxy-health     - Proxy server health check`);
+      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/test-connection  - Test connection to print server`);
+      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/status          - Detailed server status`);
+      console.log(`   *    https://${config.proxy.host}:${sslConfig.httpsPort}/api/*           - Proxied to print server`);
+      console.log(`\n✅ HTTPS Proxy server is ready to handle secure requests`);
+    });
+
+    // Also create HTTP server that redirects to HTTPS
+    const httpRedirectApp = express();
+    httpRedirectApp.use((req, res) => {
+      const httpsUrl = `https://${req.hostname}:${sslConfig.httpsPort}${req.url}`;
+      console.log(`🔄 Redirecting HTTP to HTTPS: ${req.url} → ${httpsUrl}`);
+      res.redirect(301, httpsUrl);
+    });
+
+    const httpServer = httpRedirectApp.listen(config.proxy.port, config.proxy.host, () => {
+      console.log(`🔄 HTTP Redirect Server: http://${config.proxy.host}:${config.proxy.port} → https://${config.proxy.host}:${sslConfig.httpsPort}`);
+    });
+
+  } catch (error: any) {
+    console.error('❌ SSL Setup Error:', error.message);
+    console.log('📝 Falling back to HTTP server...');
+
+    // Fallback to HTTP
+    server = app.listen(config.proxy.port, config.proxy.host, () => {
+      console.log(`\n🚀 HTTP Proxy Server Started (SSL Failed)!`);
+      console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.port}`);
+      console.log(`   Proxying to: ${config.proxy.target}`);
+      console.log(`   SSL Enabled: ❌ (${error.message})`);
+    });
+  }
+} else {
+  // Create HTTP server
+  server = app.listen(config.proxy.port, config.proxy.host, () => {
+    console.log(`\n🚀 HTTP Proxy Server Started Successfully!`);
+    console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.port}`);
+    console.log(`   Proxying to: ${config.proxy.target}`);
+    console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`   SSL Enabled: ❌ (Disabled)`);
+    console.log(`\n📋 Available Endpoints:`);
+    console.log(`   GET  /proxy-health     - Proxy server health check`);
+    console.log(`   GET  /test-connection  - Test connection to print server`);
+    console.log(`   GET  /status          - Detailed server status`);
+    console.log(`   *    /api/*           - Proxied to print server`);
+    console.log(`\n✅ HTTP Proxy server is ready to handle requests`);
+  });
+}
 
 // Set server timeout slightly higher than proxy timeout
 server.timeout = 35000;
@@ -216,8 +294,8 @@ server.timeout = 35000;
 // Enhanced graceful shutdown
 const gracefulShutdown = (signal: string) => {
   console.log(`\n${signal} received, shutting down proxy server gracefully...`);
-  
-  server.close((err) => {
+
+  server.close((err: any) => {
     if (err) {
       console.error('❌ Error during server shutdown:', err);
       process.exit(1);
@@ -225,13 +303,14 @@ const gracefulShutdown = (signal: string) => {
     console.log('✅ Proxy server shut down complete');
     process.exit(0);
   });
-  
+
   // Force shutdown after 10 seconds
   setTimeout(() => {
     console.log('⚠️  Force shutting down proxy server');
     process.exit(1);
   }, 10000);
 };
+
 
 // Process event handlers
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

@@ -1,31 +1,18 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
 import { createProxyMiddleware, Options } from 'http-proxy-middleware';
 import http from 'http';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
 
 // Import routes
 import proxyRoutes from './routes/proxy';
 
 dotenv.config();
-
-
-
-
-// Add SSL configuration
-const sslConfig = {
-  enabled: process.env.SSL_ENABLED === 'true' || process.env.NODE_ENV === 'production',
-  keyPath: process.env.SSL_KEY_PATH || path.join(__dirname, '../certs/key.pem'),
-  certPath: process.env.SSL_CERT_PATH || path.join(__dirname, '../certs/cert.pem'),
-  httpsPort: parseInt(process.env.HTTPS_PORT || '8443')
-};
-
-
 
 const app: Application = express();
 
@@ -33,20 +20,114 @@ const app: Application = express();
 const config = {
   proxy: {
     target: process.env.PRINT_SERVER_URL || 'http://localhost:3000',
-    port: parseInt(process.env.PROXY_PORT || '8080'),
+    httpsPort: parseInt(process.env.HTTPS_PORT || '8443'),
+    httpPort: parseInt(process.env.HTTP_PORT || '8080'),
     host: process.env.PROXY_HOST || '0.0.0.0'
   },
   security: {
     allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') || ['*'],
-    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
+    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
     rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX || '1000')
   }
 };
 
 console.log('🔧 Proxy Configuration:');
 console.log(`   Target: ${config.proxy.target}`);
-console.log(`   Listening: ${config.proxy.host}:${config.proxy.port}`);
+console.log(`   HTTP Port: ${config.proxy.httpPort}`);
+console.log(`   HTTPS Port: ${config.proxy.httpsPort}`);
+console.log(`   Host: ${config.proxy.host}`);
 
+// Try to load SSL certificates - with PFX support
+let sslOptions: https.ServerOptions | null = null;
+
+// Define possible certificate locations with proper typing
+interface PfxLocation {
+  type: 'PFX';
+  pfx: string;
+  passphrase: string;
+}
+
+interface PemLocation {
+  type: 'PEM';
+  cert: string;
+  key: string;
+}
+
+type CertLocation = PfxLocation | PemLocation;
+
+const certLocations: CertLocation[] = [
+  {
+    type: 'PFX',
+    pfx: path.join(process.cwd(), 'certs', 'server.pfx'),
+    passphrase: 'printserver'
+  },
+  {
+    type: 'PEM',
+    cert: path.join(process.cwd(), 'certs', 'server.crt'),
+    key: path.join(process.cwd(), 'certs', 'server.key')
+  },
+  {
+    type: 'PEM',
+    cert: path.join(process.cwd(), 'server.crt'),
+    key: path.join(process.cwd(), 'server.key')
+  },
+  {
+    type: 'PEM',
+    cert: path.join(__dirname, '..', 'certs', 'server.crt'),
+    key: path.join(__dirname, '..', 'certs', 'server.key')
+  }
+];
+
+for (const location of certLocations) {
+  try {
+    if (location.type === 'PFX') {
+      // Try PFX file first (preferred method)
+      if (fs.existsSync(location.pfx)) {
+        const pfxData = fs.readFileSync(location.pfx);
+        sslOptions = {
+          pfx: pfxData,
+          passphrase: location.passphrase
+        };
+        console.log(`🔒 SSL certificate loaded from PFX: ${location.pfx}`);
+        break;
+      }
+    } else if (location.type === 'PEM') {
+      // Try PEM files as fallback
+      if (fs.existsSync(location.cert) && fs.existsSync(location.key)) {
+        // Validate that the key file actually contains a private key
+        const keyContent = fs.readFileSync(location.key, 'utf8');
+        if (keyContent.includes('-----BEGIN PRIVATE KEY-----') || 
+            keyContent.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+          sslOptions = {
+            cert: fs.readFileSync(location.cert),
+            key: fs.readFileSync(location.key)
+          };
+          console.log(`🔒 SSL certificates loaded from PEM: ${path.dirname(location.cert)}`);
+          break;
+        } else {
+          console.log(`⚠️  Invalid private key format in: ${location.key}`);
+        }
+      }
+    }
+  } catch (error) {
+    console.log(`⚠️  Failed to load certificates from ${location.type}: ${error}`);
+  }
+}
+
+if (!sslOptions) {
+  console.log('⚠️  SSL certificates not found or invalid. HTTPS server will not start.');
+  console.log('   Checked locations:');
+  certLocations.forEach(loc => {
+    if (loc.type === 'PFX' && 'pfx' in loc) {
+      console.log(`   - PFX: ${loc.pfx}`);
+    } else if (loc.type === 'PEM' && 'cert' in loc && 'key' in loc) {
+      console.log(`   - PEM: ${loc.cert} + ${loc.key}`);
+    }
+  });
+  console.log('   Solutions:');
+  console.log('   1. Run: .\\minimal-cert.ps1 (creates PFX file)');
+  console.log('   2. Or run: .\\generate-cert-fixed.ps1 (creates PEM files)');
+}
 
 // Security middleware
 app.use(helmet({
@@ -93,7 +174,11 @@ const limiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path.startsWith('/proxy-health') || req.path.startsWith('/status')
+  skip: (req) => req.path.startsWith('/proxy-health') || 
+                  req.path.startsWith('/status') ||
+                  req.path.startsWith('/test-connection') ||
+                  req.path.startsWith('/download-cert') ||
+                  req.path.startsWith('/cert-info')
 });
 
 app.use(limiter);
@@ -104,37 +189,37 @@ app.use(compression());
 // Enhanced logging middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
   const timestamp = new Date().toISOString();
+  const protocol = req.secure ? 'HTTPS' : 'HTTP';
   const userAgent = req.get('User-Agent') || 'Unknown';
-  console.log(`[${timestamp}] ${req.method} ${req.path} - ${req.ip} - ${userAgent}`);
+  console.log(`[${timestamp}] ${protocol} ${req.method} ${req.path} - ${req.ip} - ${userAgent.substring(0, 50)}`);
   next();
 });
 
-// IMPORTANT: Apply routes BEFORE proxy middleware
-// These routes use their own body parsing
+// Apply routes BEFORE proxy middleware
 app.use('/', proxyRoutes);
 
 // Proxy configuration with proper error handling
 const proxyOptions: Options = {
   target: config.proxy.target,
   changeOrigin: true,
-
+  
   // Timeout settings
   timeout: 30000,
   proxyTimeout: 30000,
-
+  
   // Preserve original headers
   preserveHeaderKeyCase: true,
-
+  
   on: {
     proxyReq: (proxyReq: http.ClientRequest, req: http.IncomingMessage) => {
-      console.log(`🚀 PROXY REQ: ${req.method} ${req.url} → ${config.proxy.target}${req.url}`);
-      console.log(`   Content-Length: ${req.headers['content-length'] || 'unknown'}`);
-      console.log(`   Content-Type: ${req.headers['content-type'] || 'unknown'}`);
+      const protocol = (req.socket as any).encrypted ? 'HTTPS' : 'HTTP';
+      console.log(`🚀 ${protocol} PROXY REQ: ${req.method} ${req.url} → ${config.proxy.target}${req.url}`);
     },
-
+    
     proxyRes: (proxyRes: http.IncomingMessage, req: http.IncomingMessage) => {
-      console.log(`✅ PROXY RES: ${proxyRes.statusCode} for ${req.method} ${req.url}`);
-
+      const protocol = (req.socket as any).encrypted ? 'HTTPS' : 'HTTP';
+      console.log(`✅ ${protocol} PROXY RES: ${proxyRes.statusCode} for ${req.method} ${req.url}`);
+      
       // Add CORS headers to proxied responses
       if (proxyRes.headers) {
         proxyRes.headers['access-control-allow-origin'] = '*';
@@ -142,17 +227,18 @@ const proxyOptions: Options = {
         proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization, X-Requested-With';
       }
     },
-
+    
     error: (err: Error, req: http.IncomingMessage, res: http.ServerResponse | any) => {
-      console.error(`❌ PROXY ERROR for ${req.method} ${req.url}:`, {
+      const protocol = (req.socket as any)?.encrypted ? 'HTTPS' : 'HTTP';
+      console.error(`❌ ${protocol} PROXY ERROR for ${req.method} ${req.url}:`, {
         message: err.message,
         code: (err as any).code,
         target: config.proxy.target
       });
-
+      
       // Type guard and error response
       if ('writeHead' in res && 'end' in res && res.writable && !res.headersSent) {
-        res.writeHead(502, {
+        res.writeHead(502, { 
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': '*'
         });
@@ -161,7 +247,8 @@ const proxyOptions: Options = {
           error: 'Print server unavailable',
           message: `Unable to connect to print server at ${config.proxy.target}`,
           details: err.message,
-          code: (err as any).code
+          code: (err as any).code,
+          protocol: protocol
         }));
       }
     }
@@ -174,30 +261,34 @@ const proxy = createProxyMiddleware(proxyOptions);
 // Apply proxy to all routes except those handled by proxyRoutes
 app.use((req: Request, res: Response, next: NextFunction) => {
   // Skip proxy for routes handled by proxyRoutes
-  if (req.path === '/proxy-health' ||
-    req.path === '/test-connection' ||
-    req.path === '/status') {
+  if (req.path === '/proxy-health' || 
+      req.path === '/test-connection' || 
+      req.path === '/status' ||
+      req.path === '/download-cert' ||
+      req.path === '/cert-info') {
     return next();
   }
-
+  
   // Use proxy for all other routes (especially /api/*)
   return proxy(req, res, next);
 });
 
 // Global error handling middleware
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  console.error('💥 Unhandled proxy server error:', {
+  const protocol = req.secure ? 'HTTPS' : 'HTTP';
+  console.error(`💥 ${protocol} Unhandled proxy server error:`, {
     message: err.message,
-    stack: err.stack,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
     url: req.url,
     method: req.method
   });
-
+  
   if (!res.headersSent) {
     res.status(500).json({
       success: false,
       error: 'Proxy server error',
       message: 'An unexpected error occurred in the proxy server.',
+      protocol: protocol,
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   }
@@ -205,114 +296,112 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 
 // 404 handler for unmatched routes
 app.use('*', (req: Request, res: Response) => {
+  const protocol = req.secure ? 'HTTPS' : 'HTTP';
   res.status(404).json({
     success: false,
     error: 'Route not found',
-    message: `The requested route ${req.method} ${req.originalUrl} was not found.`
+    message: `The requested route ${req.method} ${req.originalUrl} was not found.`,
+    protocol: protocol
   });
 });
 
-// Start the proxy server
-// Create server (HTTP or HTTPS based on configuration)
-let server: any;
+// Start HTTP server (always available)
+const httpServer = http.createServer(app);
+httpServer.listen(config.proxy.httpPort, config.proxy.host, () => {
+  console.log(`\n🌐 HTTP Proxy Server:`);
+  console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.httpPort}`);
+  console.log(`   Proxying to: ${config.proxy.target}`);
+  console.log(`   Status: ✅ Ready (no certificate required)`);
+});
 
-if (sslConfig.enabled) {
+// Start HTTPS server (if certificates available)
+let httpsServer: https.Server | null = null;
+if (sslOptions) {
   try {
-    // Check if certificate files exist
-    if (!fs.existsSync(sslConfig.keyPath)) {
-      throw new Error(`SSL key file not found: ${sslConfig.keyPath}`);
-    }
-    if (!fs.existsSync(sslConfig.certPath)) {
-      throw new Error(`SSL certificate file not found: ${sslConfig.certPath}`);
-    }
-
-    // Read SSL certificates
-    const sslOptions = {
-      key: fs.readFileSync(sslConfig.keyPath),
-      cert: fs.readFileSync(sslConfig.certPath)
-    };
-
-    // Create HTTPS server
-    server = https.createServer(sslOptions, app).listen(sslConfig.httpsPort, config.proxy.host, () => {
-      console.log(`\n🔒 HTTPS Proxy Server Started Successfully!`);
-      console.log(`   Listening on: https://${config.proxy.host}:${sslConfig.httpsPort}`);
+    httpsServer = https.createServer(sslOptions, app);
+    httpsServer.listen(config.proxy.httpsPort, config.proxy.host, () => {
+      console.log(`\n🔒 HTTPS Proxy Server:`);
+      console.log(`   Listening on: https://${config.proxy.host}:${config.proxy.httpsPort}`);
       console.log(`   Proxying to: ${config.proxy.target}`);
-      console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`   SSL Enabled: ✅`);
-      console.log(`\n📋 Available Endpoints:`);
-      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/proxy-health     - Proxy server health check`);
-      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/test-connection  - Test connection to print server`);
-      console.log(`   GET  https://${config.proxy.host}:${sslConfig.httpsPort}/status          - Detailed server status`);
-      console.log(`   *    https://${config.proxy.host}:${sslConfig.httpsPort}/api/*           - Proxied to print server`);
-      console.log(`\n✅ HTTPS Proxy server is ready to handle secure requests`);
+      console.log(`   Status: ✅ Ready (certificate loaded successfully)`);
     });
-
-    // Also create HTTP server that redirects to HTTPS
-    const httpRedirectApp = express();
-    httpRedirectApp.use((req, res) => {
-      const httpsUrl = `https://${req.hostname}:${sslConfig.httpsPort}${req.url}`;
-      console.log(`🔄 Redirecting HTTP to HTTPS: ${req.url} → ${httpsUrl}`);
-      res.redirect(301, httpsUrl);
+    
+    // Set timeout for HTTPS server
+    httpsServer.timeout = 35000;
+    
+    // Handle HTTPS server errors
+    httpsServer.on('error', (error: any) => {
+      console.error('❌ HTTPS Server Error:', error.message);
+      if (error.code === 'EADDRINUSE') {
+        console.log(`⚠️  Port ${config.proxy.httpsPort} is already in use`);
+      } else if (error.code === 'EACCES') {
+        console.log(`⚠️  Permission denied on port ${config.proxy.httpsPort}`);
+      }
     });
-
-    const httpServer = httpRedirectApp.listen(config.proxy.port, config.proxy.host, () => {
-      console.log(`🔄 HTTP Redirect Server: http://${config.proxy.host}:${config.proxy.port} → https://${config.proxy.host}:${sslConfig.httpsPort}`);
-    });
-
+    
   } catch (error: any) {
-    console.error('❌ SSL Setup Error:', error.message);
-    console.log('📝 Falling back to HTTP server...');
-
-    // Fallback to HTTP
-    server = app.listen(config.proxy.port, config.proxy.host, () => {
-      console.log(`\n🚀 HTTP Proxy Server Started (SSL Failed)!`);
-      console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.port}`);
-      console.log(`   Proxying to: ${config.proxy.target}`);
-      console.log(`   SSL Enabled: ❌ (${error.message})`);
-    });
+    console.error('❌ Failed to start HTTPS server:', error.message);
+    httpsServer = null;
   }
 } else {
-  // Create HTTP server
-  server = app.listen(config.proxy.port, config.proxy.host, () => {
-    console.log(`\n🚀 HTTP Proxy Server Started Successfully!`);
-    console.log(`   Listening on: http://${config.proxy.host}:${config.proxy.port}`);
-    console.log(`   Proxying to: ${config.proxy.target}`);
-    console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`   SSL Enabled: ❌ (Disabled)`);
-    console.log(`\n📋 Available Endpoints:`);
-    console.log(`   GET  /proxy-health     - Proxy server health check`);
-    console.log(`   GET  /test-connection  - Test connection to print server`);
-    console.log(`   GET  /status          - Detailed server status`);
-    console.log(`   *    /api/*           - Proxied to print server`);
-    console.log(`\n✅ HTTP Proxy server is ready to handle requests`);
-  });
+  console.log(`\n🔒 HTTPS Proxy Server: ❌ Disabled (no valid certificates)`);
+  console.log(`   To enable HTTPS:`);
+  console.log(`   1. Run: .\\minimal-cert.ps1 (recommended - creates PFX)`);
+  console.log(`   2. Or run: .\\generate-cert-fixed.ps1 (creates separate files)`);
+  console.log(`   3. Restart this server`);
 }
 
-// Set server timeout slightly higher than proxy timeout
-server.timeout = 35000;
+// Set timeout for HTTP server
+httpServer.timeout = 35000;
+
+console.log(`\n📋 Available Endpoints:`);
+console.log(`   HTTP Proxy:   http://10.0.1.16:${config.proxy.httpPort}/api/print/metrics`);
+console.log(`   HTTP Health:  http://10.0.1.16:${config.proxy.httpPort}/proxy-health`);
+console.log(`   HTTP Test:    http://10.0.1.16:${config.proxy.httpPort}/test-connection`);
+
+if (httpsServer) {
+  console.log(`   HTTPS Proxy:  https://10.0.1.16:${config.proxy.httpsPort}/api/print/metrics`);
+  console.log(`   HTTPS Health: https://10.0.1.16:${config.proxy.httpsPort}/proxy-health`);
+  console.log(`   HTTPS Test:   https://10.0.1.16:${config.proxy.httpsPort}/test-connection`);
+  console.log(`   Download Cert: http://10.0.1.16:${config.proxy.httpPort}/download-cert`);
+  console.log(`   Cert Info:    http://10.0.1.16:${config.proxy.httpPort}/cert-info`);
+}
+
+console.log(`\n💡 Usage Tips:`);
+console.log(`   - Use HTTP endpoints for quick testing without certificates`);
+console.log(`   - Use HTTPS endpoints for secure production access`);
+if (!httpsServer) {
+  console.log(`   - Run .\\minimal-cert.ps1 to create certificates and enable HTTPS`);
+}
 
 // Enhanced graceful shutdown
 const gracefulShutdown = (signal: string) => {
-  console.log(`\n${signal} received, shutting down proxy server gracefully...`);
-
-  server.close((err: any) => {
-    if (err) {
-      console.error('❌ Error during server shutdown:', err);
-      process.exit(1);
-    }
-    console.log('✅ Proxy server shut down complete');
+  console.log(`\n${signal} received, shutting down proxy servers gracefully...`);
+  
+  const closePromises: Promise<void>[] = [
+    new Promise<void>((resolve) => httpServer.close(() => resolve()))
+  ];
+  
+  if (httpsServer) {
+    closePromises.push(
+      new Promise<void>((resolve) => httpsServer!.close(() => resolve()))
+    );
+  }
+  
+  Promise.all(closePromises).then(() => {
+    console.log('✅ All proxy servers shut down complete');
     process.exit(0);
+  }).catch((err) => {
+    console.error('❌ Error during server shutdown:', err);
+    process.exit(1);
   });
-
-  // Force shutdown after 10 seconds
+  
   setTimeout(() => {
-    console.log('⚠️  Force shutting down proxy server');
+    console.log('⚠️  Force shutting down proxy servers');
     process.exit(1);
   }, 10000);
 };
 
-
-// Process event handlers
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 

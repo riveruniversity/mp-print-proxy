@@ -19,6 +19,14 @@ const svc = new Service({
       value: "8080"
     },
     {
+      name: "PRINT_SERVER_PORT",
+      value: 3000
+    },
+    {
+      name: "PRINT_SERVER_HOST",
+      value: 'http://10.0.1.12'
+    },
+    {
       name: "PRINT_SERVER_URL",
       value: "http://10.0.1.12:3000"
     }

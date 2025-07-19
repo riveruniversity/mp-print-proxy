@@ -17,7 +17,7 @@ dotenv.config();
 const app: Application = express();
 
 // Configuration
-const config = {
+export const config = {
   proxy: {
     httpsPort: parseInt(process.env.HTTPS_PORT || '8443'),
     httpPort: parseInt(process.env.HTTP_PORT || '8080'),

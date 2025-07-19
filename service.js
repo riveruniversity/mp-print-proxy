@@ -4,7 +4,7 @@ const path = require('path');
 // Create a new service object
 const svc = new Service({
   name: 'PrintProxyServer',
-  description: 'Proxy server for high-performance print server',
+  description: 'Proxy server for mp wristband print server',
   script: path.join(__dirname, 'dist', 'proxy-server.js'),
   nodeOptions: [
     '--max-old-space-size=4096'

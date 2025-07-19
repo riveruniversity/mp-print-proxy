@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { config } from '../proxy-server';
+import { config } from '../config';
+
 
 const router = Router();
 

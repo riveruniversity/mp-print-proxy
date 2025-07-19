@@ -1,6 +1,6 @@
 {
   "name": "mp-print-proxy",
-  "version": "1.0.0",
+  "version": "1.0.9",
   "description": "Proxy server for mp print server",
   "main": "dist/proxy-server.js",
   "scripts": {

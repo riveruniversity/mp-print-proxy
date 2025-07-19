@@ -1,137 +1,23 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
-import { createProxyMiddleware, Options } from 'http-proxy-middleware';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import http from 'http';
 import https from 'https';
-import fs from 'fs';
-import path from 'path';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
-import dotenv from 'dotenv';
-
-// Import routes
+// routes
 import proxyRoutes from './routes/proxy';
+// modules
+import { config } from './config';
+import { sslOptions } from './config/ssl';
+import { corsConfig } from './middleware/cors';
+import { logging } from './middleware/logging';
+import { proxyOptions } from './config/proxy';
 
-dotenv.config();
 
 const app: Application = express();
 
-// Configuration
-export const config = {
-  proxy: {
-    httpsPort: parseInt(process.env.HTTPS_PORT || '8443'),
-    httpPort: parseInt(process.env.HTTP_PORT || '8080'),
-    host: process.env.PROXY_HOST || '0.0.0.0'
-  },
-  target: {
-    url: (process.env.PRINT_SERVER_HOST + ':' + process.env.PRINT_SERVER_PORT) || 'http://localhost:3000',
-    port: parseInt(process.env.PRINT_SERVER_PORT || '3000'),
-    host: process.env.PRINT_SERVER_HOST || '0.0.0.0'
-  },
-  security: {
-    allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') || ['*'],
-    rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'),
-    rateLimitMax: parseInt(process.env.RATE_LIMIT_MAX || '1000')
-  }
-};
 
-console.log('🔧 Proxy Configuration:');
-console.log(`   Target: ${config.target.url}`);
-console.log(`   HTTP Port: ${config.proxy.httpPort}`);
-console.log(`   HTTPS Port: ${config.proxy.httpsPort}`);
-console.log(`   Host: ${config.proxy.host}`);
-
-// Try to load SSL certificates - with PFX support
-let sslOptions: https.ServerOptions | null = null;
-
-// Define possible certificate locations with proper typing
-interface PfxLocation {
-  type: 'PFX';
-  pfx: string;
-  passphrase: string;
-}
-
-interface PemLocation {
-  type: 'PEM';
-  cert: string;
-  key: string;
-}
-
-type CertLocation = PfxLocation | PemLocation;
-
-const certLocations: CertLocation[] = [
-  {
-    type: 'PFX',
-    pfx: path.join(process.cwd(), 'certs', 'server.pfx'),
-    passphrase: 'printserver'
-  },
-  {
-    type: 'PEM',
-    cert: path.join(process.cwd(), 'certs', 'server.crt'),
-    key: path.join(process.cwd(), 'certs', 'server.key')
-  },
-  {
-    type: 'PEM',
-    cert: path.join(process.cwd(), 'server.crt'),
-    key: path.join(process.cwd(), 'server.key')
-  },
-  {
-    type: 'PEM',
-    cert: path.join(__dirname, '..', 'certs', 'server.crt'),
-    key: path.join(__dirname, '..', 'certs', 'server.key')
-  }
-];
-
-for (const location of certLocations) {
-  try {
-    if (location.type === 'PFX') {
-      // Try PFX file first (preferred method)
-      if (fs.existsSync(location.pfx)) {
-        const pfxData = fs.readFileSync(location.pfx);
-        sslOptions = {
-          pfx: pfxData,
-          passphrase: location.passphrase
-        };
-        console.log(`🔒 SSL certificate loaded from PFX: ${location.pfx}`);
-        break;
-      }
-    } else if (location.type === 'PEM') {
-      // Try PEM files as fallback
-      if (fs.existsSync(location.cert) && fs.existsSync(location.key)) {
-        // Validate that the key file actually contains a private key
-        const keyContent = fs.readFileSync(location.key, 'utf8');
-        if (keyContent.includes('-----BEGIN PRIVATE KEY-----') || 
-            keyContent.includes('-----BEGIN RSA PRIVATE KEY-----')) {
-          sslOptions = {
-            cert: fs.readFileSync(location.cert),
-            key: fs.readFileSync(location.key)
-          };
-          console.log(`🔒 SSL certificates loaded from PEM: ${path.dirname(location.cert)}`);
-          break;
-        } else {
-          console.log(`⚠️  Invalid private key format in: ${location.key}`);
-        }
-      }
-    }
-  } catch (error) {
-    console.log(`⚠️  Failed to load certificates from ${location.type}: ${error}`);
-  }
-}
-
-if (!sslOptions) {
-  console.log('⚠️  SSL certificates not found or invalid. HTTPS server will not start.');
-  console.log('   Checked locations:');
-  certLocations.forEach(loc => {
-    if (loc.type === 'PFX' && 'pfx' in loc) {
-      console.log(`   - PFX: ${loc.pfx}`);
-    } else if (loc.type === 'PEM' && 'cert' in loc && 'key' in loc) {
-      console.log(`   - PEM: ${loc.cert} + ${loc.key}`);
-    }
-  });
-  console.log('   Solutions:');
-  console.log('   1. Run: .\\minimal-cert.ps1 (creates PFX file)');
-  console.log('   2. Or run: .\\generate-cert-fixed.ps1 (creates PEM files)');
-}
 
 // Security middleware
 app.use(helmet({
@@ -141,32 +27,7 @@ app.use(helmet({
 }));
 
 // Enhanced CORS middleware for private network requests
-app.use((req: Request, res: Response, next: NextFunction): void => {
-  const origin = req.headers.origin;
-  const allowedOrigins = config.security.allowedOrigins;
-
-  // Allow all origins if '*' is specified, otherwise check allowed list
-  if (allowedOrigins.includes('*') || allowedOrigins.includes(origin || '')) {
-    res.header('Access-Control-Allow-Origin', origin || '*');
-  }
-
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, X-Forwarded-For');
-  res.header('Access-Control-Allow-Credentials', 'true');
-
-  // Handle private network requests (required for local development)
-  if (req.headers['access-control-request-private-network']) {
-    res.header('Access-Control-Allow-Private-Network', 'true');
-  }
-
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-
-  next();
-});
+app.use(corsConfig);
 
 // Rate limiting - skip for health checks
 const limiter = rateLimit({
@@ -191,73 +52,12 @@ app.use(limiter);
 app.use(compression());
 
 // Enhanced logging middleware
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const timestamp = new Date().toISOString();
-  const protocol = req.secure ? 'HTTPS' : 'HTTP';
-  const userAgent = req.get('User-Agent') || 'Unknown';
-  console.log(`[${timestamp}] ${protocol} ${req.method} ${req.path} - ${req.ip} - ${userAgent.substring(0, 50)}`);
-  next();
-});
+app.use(logging);
 
 // Apply routes BEFORE proxy middleware
 app.use('/', proxyRoutes);
 
-// Proxy configuration with proper error handling
-const proxyOptions: Options = {
-  target: config.target.url,
-  changeOrigin: true,
-  
-  // Timeout settings
-  timeout: 30000,
-  proxyTimeout: 30000,
-  
-  // Preserve original headers
-  preserveHeaderKeyCase: true,
-  
-  on: {
-    proxyReq: (proxyReq: http.ClientRequest, req: http.IncomingMessage) => {
-      const protocol = (req.socket as any).encrypted ? 'HTTPS' : 'HTTP';
-      console.log(`🚀 ${protocol} PROXY REQ: ${req.method} ${req.url} → ${config.target.url}${req.url}`);
-    },
-    
-    proxyRes: (proxyRes: http.IncomingMessage, req: http.IncomingMessage) => {
-      const protocol = (req.socket as any).encrypted ? 'HTTPS' : 'HTTP';
-      console.log(`✅ ${protocol} PROXY RES: ${proxyRes.statusCode} for ${req.method} ${req.url}`);
-      
-      // Add CORS headers to proxied responses
-      if (proxyRes.headers) {
-        proxyRes.headers['access-control-allow-origin'] = '*';
-        proxyRes.headers['access-control-allow-methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-        proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization, X-Requested-With';
-      }
-    },
-    
-    error: (err: Error, req: http.IncomingMessage, res: http.ServerResponse | any) => {
-      const protocol = (req.socket as any)?.encrypted ? 'HTTPS' : 'HTTP';
-      console.error(`❌ ${protocol} PROXY ERROR for ${req.method} ${req.url}:`, {
-        message: err.message,
-        code: (err as any).code,
-        target: config.target.url
-      });
-      
-      // Type guard and error response
-      if ('writeHead' in res && 'end' in res && res.writable && !res.headersSent) {
-        res.writeHead(502, { 
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        });
-        res.end(JSON.stringify({
-          success: false,
-          error: 'Print server unavailable',
-          message: `Unable to connect to print server at ${config.target.url}`,
-          details: err.message,
-          code: (err as any).code,
-          protocol: protocol
-        }));
-      }
-    }
-  }
-};
+
 
 // Create proxy middleware
 const proxy = createProxyMiddleware(proxyOptions);

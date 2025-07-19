@@ -124,6 +124,8 @@ yarn.lock
 pnpm-lock.yaml
 
 # SSL certificates (if any)
+cert/
+certs/
 *.pem
 *.key
 *.crt
